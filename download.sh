@@ -99,15 +99,19 @@ link_into() {
 }
 
 # 1) EXL3 weights → default cache → symlink $MODEL_HOST → snapshots/main
-have=$(find "$MODEL_HOST" -maxdepth 1 -name 'model-*.safetensors' 2>/dev/null | wc -l | tr -d '[:space:]')
-echo "EXL3    $MODEL_HOST  ${have:-0}/$EXPECTED_SHARDS shards"
+# (|| true keeps the pipeline exit-status 0 under `set -euo pipefail` even
+# when $MODEL_HOST does not exist yet — find would exit 1 and errexit would
+# abort the script before it ever reaches the fetch branch.)
+have=$(find "$MODEL_HOST" -maxdepth 1 -name 'model-*.safetensors' 2>/dev/null | wc -l | tr -d '[:space:]' || true)
+have=${have:-0}
+echo "EXL3    $MODEL_HOST  $have/$EXPECTED_SHARDS shards"
 if [ "${have:-0}" -lt "$EXPECTED_SHARDS" ] || [ ! -f "$MODEL_HOST/config.json" ]; then
     echo "fetching $HF_MODEL_REPO → hub cache (default; HF_ENDPOINT=${HF_ENDPOINT:-https://huggingface.co})"
     hf_cli download "$HF_MODEL_REPO" --max-workers "${HF_MAX_WORKERS:-8}"
     snap="$(cache_snapshot_dir "$HF_MODEL_REPO")" || {
         echo "download finished but no snapshot dir for $HF_MODEL_REPO in the hub cache" >&2; exit 1; }
     link_into "$MODEL_HOST" "$snap"
-    have=$(find "$MODEL_HOST" -maxdepth 1 -name 'model-*.safetensors' 2>/dev/null | wc -l | tr -d '[:space:]')
+    have=$(find "$MODEL_HOST" -maxdepth 1 -name 'model-*.safetensors' 2>/dev/null | wc -l | tr -d '[:space:]' || true)
     echo "EXL3    $MODEL_HOST  ${have:-0}/$EXPECTED_SHARDS shards (after link)"
 fi
 
