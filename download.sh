@@ -24,6 +24,15 @@
 # automatically, so this script is only for staging the download separately.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+
+# PATH for the hf CLI under non-interactive shells (ssh ./download.sh): the
+# operator's ~/.bashrc exports PATH="$HOME/.local/bin:$PATH" behind an
+# interactive-only guard (case $- ... return), so a plain `ssh host
+# ./download.sh` would not see ~/.local/bin/hf and hf_cli would exit 1
+# before printing anything. Prepend it here so the download works whether
+# the session is interactive or not.
+export PATH="$HOME/.local/bin:$PATH"
+
 [ -f "$SCRIPT_DIR/.env" ] || cp "$SCRIPT_DIR/.env.example" "$SCRIPT_DIR/.env"
 set -a
 # shellcheck disable=SC1091
