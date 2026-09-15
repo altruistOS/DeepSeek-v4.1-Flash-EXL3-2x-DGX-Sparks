@@ -237,7 +237,7 @@ nfs_worker_has_file() {
     fi
     if [ -z "$probe" ]; then
         # 没有轻量探针可用：退回 worker 本地已有镜像 + 显式覆盖 entrypoint，
-        # 用 --entrypoint test 避免触发镜像内置的 vllm 命令
+        # 用 --entrypoint test 避免触发镜像内置的 vllm 命令（其设备推断会干扰挂载实验判定）
         probe="$IMAGE"
         worker_ssh "docker image inspect '$probe' >/dev/null 2>&1" >/dev/null 2>&1 || {
             warn "no probe image available on worker for mount verification; assuming mounts ok"
@@ -246,7 +246,7 @@ nfs_worker_has_file() {
         worker_ssh "docker run --rm --entrypoint test -v '${volume}:/m:ro' $probe -f /m/${rel}" >/dev/null 2>&1
         return $?
     fi
-    worker_ssh "docker run --rm -v '${volume}:/m:ro' $probe test -f /m/${rel}" >/dev/null 2>&1
+    worker_ssh "docker run --rm --entrypoint test -v '${volume}:/m:ro' $probe -f /m/${rel}" >/dev/null 2>&1
 }
 
 nfs_host_mode_share() {
