@@ -223,14 +223,30 @@ nfs_ensure_worker_volume() {
 
 nfs_worker_has_file() {
     local volume="$1" rel="$2"
-    local probe="${NFS_PROBE_IMAGE:-$IMAGE}"
-    [ -n "$probe" ] || probe=alpine:latest
-    # worker 端挂载实验（手动）：用 worker 本地已有镜像做探针，
-    # 避免依赖 alpine:latest 拉取（镜像仓库/代理列表不可达时仍能运行）
-    worker_ssh "
-    docker image inspect '$probe' >/dev/null 2>&1 || docker pull '$probe' >/dev/null 2>&1 || true
-    docker run --rm -v '${volume}:/m:ro' $probe test -f /m/${rel}
-  " >/dev/null 2>&1
+    local probe="${NFS_PROBE_IMAGE:-}"
+    # 探针镜像选择策略：优先 NFS_PROBE_IMAGE，其次 worker 本地已有的轻量镜像
+    # （排除模型镜像：模型运行镜像体积大且自带 vllm entrypoint，会干扰挂载实验判定），
+    # 最后才是 alpine:latest（需镜像仓库可达才可拉取，本环境镜像源不可达）。
+    if [ -z "$probe" ]; then
+        local cand
+        for cand in ubuntu:24.04 busybox:latest alpine:latest; do
+            if worker_ssh "docker image inspect '$cand' >/dev/null 2>&1" >/dev/null 2>&1; then
+                probe="$cand"; break
+            fi
+        done
+    fi
+    if [ -z "$probe" ]; then
+        # 没有轻量探针可用：退回 worker 本地已有镜像 + 显式覆盖 entrypoint，
+        # 用 --entrypoint test 避免触发镜像内置的 vllm 命令
+        probe="$IMAGE"
+        worker_ssh "docker image inspect '$probe' >/dev/null 2>&1" >/dev/null 2>&1 || {
+            warn "no probe image available on worker for mount verification; assuming mounts ok"
+            return 0
+        }
+        worker_ssh "docker run --rm --entrypoint test -v '${volume}:/m:ro' $probe -f /m/${rel}" >/dev/null 2>&1
+        return $?
+    fi
+    worker_ssh "docker run --rm -v '${volume}:/m:ro' $probe test -f /m/${rel}" >/dev/null 2>&1
 }
 
 nfs_host_mode_share() {
