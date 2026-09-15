@@ -237,6 +237,68 @@ index) into `dsv41-engram`. spark2 docker volumes:
 ./start.sh          # WEIGHT_SYNC=nfs is the default in .env
 ```
 
+#### Symlink trees — why the export must point at real files
+
+When the weights arrive through the `hf` CLI into the **default hub cache**, the
+tree it leaves under `snapshots/<rev>/` is built from relative symlinks into
+`../../blobs/<sha>`:
+
+```
+model/config.json                  -> ../../blobs/eeec9412...
+model-00001-of-00039.safetensors   -> ../../blobs/a4f64372...
+```
+
+Exporting that directory over NFS looks fine from the head and fails on the
+worker. The export root *is* the snapshot dir, so every entry resolves outside
+it: `ls /m` lists the names, but `test -f /m/config.json` returns non-zero
+because the symlink target is not under the export. `./start.sh` detects this
+shape (`is_symlink_tree`) and dereferences it into real files — hardlinked, so
+no extra bytes on the same filesystem — under `MATERIALIZE_ROOT`
+(default `$CACHE_ROOT/model`), then repoints `MODEL_HOST` at that directory.
+
+`cp -a --link` does **not** solve this: it preserves the symlink itself, so the
+copy is exactly as dangling as the source. `nfs_hardlink_tree` in
+`scripts/nfs-share.sh` is safe for the Engram tree only because
+`prepare_engram_src.py` has already materialized it into hardlinks.
+
+#### Host-native NFS (`HOST_NFS=1`)
+
+Use this when the head already runs an nfs-server sharing a common HF cache
+(`vllm-fn-nfs`, `glm53-nfs`, `dsv41-nfs`, `dsv41-exl3-nfs`). Only one `nfsd`
+owns the kernel export table, so the kit skips its own exporter container and
+mounts the administrator's existing exports instead.
+
+Two exports must already exist in `/etc/exports` on the head, naming the
+**materialized** directories from above (not the snapshot):
+
+```
+/home/<user>/.cache/vllm-dsv41-flash-exl3/model \
+    192.168.177.0/24(ro,sync,no_subtree_check,no_root_squash,insecure,fsid=1)
+/home/<user>/.cache/vllm-dsv41-flash-exl3/engram-src \
+    192.168.177.0/24(ro,sync,no_subtree_check,no_root_squash,insecure,fsid=2)
+```
+
+```bash
+sudo exportfs -rav
+showmount -e localhost     # must list both names
+```
+
+Then in `.env`:
+
+```
+HOST_NFS=1
+NFS_SHARE=0
+NFS_EXPORT_MODEL=model
+NFS_EXPORT_ENGRAM=engram-src
+NFS_DEVICE_MODEL=:/home/<user>/.cache/vllm-dsv41-flash-exl3/model
+NFS_DEVICE_ENGRAM=:/home/<user>/.cache/vllm-dsv41-flash-exl3/engram-src
+```
+
+`NFS_EXPORT_MODEL` / `NFS_EXPORT_ENGRAM` are the path components `showmount`
+prints; `NFS_DEVICE_*` are what the worker's docker volumes mount. If a name is
+absent from `showmount`, `nfs_host_mode_share` dies with the exact `exportfs`
+command to run rather than failing later on the worker.
+
 **ZFS (optional, `WEIGHT_SYNC=zfs`).** Keeps a node-local replica on each Spark
 instead of serving the worker over the network, and updates it with
 `zfs send | recv` snapshot deltas rather than re-walking the tree.
@@ -301,6 +363,7 @@ Host-side (pure source/JSON checks — no torch, no vLLM):
 ```bash
 python3 tests/test_numeric_config.py
 python3 tests/test_engram_src.py
+python3 tests/test_materialize.py
 python3 tests/test_engram_secondary.py
 python3 tests/test_k_map.py
 python3 tests/test_memory_log.py

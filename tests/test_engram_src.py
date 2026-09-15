@@ -69,7 +69,104 @@ def test_prepare_hardlinks(tmp_path: Path | None = None) -> None:
         assert info["files"][SHARDS[0]] in ("hardlink", "exists")
 
 
+def test_config_from_fallback() -> None:
+    """$ENGRAM_DIR (native tree) has no config.json; take it from MODEL_HOST.
+
+    engram_file_backend._layer_id_from_embeddings reads table_dir/config.json
+    and raises FileNotFoundError when the slim dir has none, which is how the
+    engine died on /engram-src/config.json.
+    """
+    from tempfile import TemporaryDirectory
+
+    with TemporaryDirectory() as raw:
+        src = Path(raw) / "native"
+        model = Path(raw) / "model"
+        dst = Path(raw) / "slim"
+        src.mkdir()
+        model.mkdir()
+        (src / SHARDS[0]).write_bytes(b"47")
+        (src / SHARDS[1]).write_bytes(b"48")
+        cfg = {
+            "text_config": {
+                "engram_layer_ids": [1, 14],
+                "engram_num_embeddings": [384006168, 384016682],
+            }
+        }
+        (model / "config.json").write_text(json.dumps(cfg))
+        index = {
+            "metadata": {"total_size": 3},
+            "weight_map": {
+                "layers.1.engram.embed.weight": SHARDS[0],
+                "layers.1.engram.embed.scale": SHARDS[0],
+                "layers.14.engram.embed.weight": SHARDS[1],
+                "layers.14.engram.embed.scale": SHARDS[1],
+            },
+        }
+        (src / "model.safetensors.index.json").write_text(json.dumps(index))
+
+        info = prepare(src, dst, model)
+        assert (dst / "config.json").is_file(), "config.json must land in dst"
+        got = json.loads((dst / "config.json").read_text())
+        assert got["text_config"]["engram_layer_ids"] == [1, 14]
+        assert info["files"]["config.json"] == "copy"
+
+
+def test_config_from_accepts_a_file_path() -> None:
+    from tempfile import TemporaryDirectory
+
+    with TemporaryDirectory() as raw:
+        src = Path(raw) / "native"
+        model = Path(raw) / "model"
+        dst = Path(raw) / "slim"
+        src.mkdir()
+        model.mkdir()
+        (src / SHARDS[0]).write_bytes(b"47")
+        (src / SHARDS[1]).write_bytes(b"48")
+        (model / "config.json").write_text('{"text_config": {"engram_layer_ids": [1]}}')
+        index = {
+            "metadata": {},
+            "weight_map": {
+                "layers.1.engram.embed.weight": SHARDS[0],
+                "layers.1.engram.embed.scale": SHARDS[0],
+            },
+        }
+        (src / "model.safetensors.index.json").write_text(json.dumps(index))
+
+        prepare(src, dst, model / "config.json")
+        assert (dst / "config.json").is_file()
+
+
+def test_missing_config_raises() -> None:
+    """Without a config.json the backend cannot map layers — fail loudly here."""
+    from tempfile import TemporaryDirectory
+
+    with TemporaryDirectory() as raw:
+        src = Path(raw) / "native"
+        dst = Path(raw) / "slim"
+        src.mkdir()
+        (src / SHARDS[0]).write_bytes(b"47")
+        (src / SHARDS[1]).write_bytes(b"48")
+        index = {
+            "metadata": {},
+            "weight_map": {
+                "layers.1.engram.embed.weight": SHARDS[0],
+                "layers.1.engram.embed.scale": SHARDS[0],
+            },
+        }
+        (src / "model.safetensors.index.json").write_text(json.dumps(index))
+
+        try:
+            prepare(src, dst)
+        except SystemExit as exc:
+            assert "config.json" in str(exc)
+        else:
+            raise AssertionError("prepare must fail when no config.json is available")
+
+
 if __name__ == "__main__":
     test_slim_weight_map()
     test_prepare_hardlinks()
+    test_config_from_fallback()
+    test_config_from_accepts_a_file_path()
+    test_missing_config_raises()
     print("test_engram_src: ok")

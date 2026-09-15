@@ -49,7 +49,7 @@ def link_or_copy(src: Path, dst: Path) -> str:
         return "copy"
 
 
-def prepare(src: Path, dst: Path) -> dict[str, object]:
+def prepare(src: Path, dst: Path, config_from: Path | None = None) -> dict[str, object]:
     index_path = src / "model.safetensors.index.json"
     if not index_path.is_file():
         raise SystemExit(f"missing {index_path}")
@@ -80,10 +80,29 @@ def prepare(src: Path, dst: Path) -> dict[str, object]:
         "weight_map": keep,
     }
     (dst / "model.safetensors.index.json").write_text(json.dumps(slim, indent=2) + "\n")
+
+    # config.json must be present in dst: engram_file_backend._layer_id_from_embeddings
+    # reads dst/config.json for text_config.engram_layer_ids /
+    # engram_num_embeddings and raises FileNotFoundError otherwise.
+    #
+    # $ENGRAM_DIR (the native checkpoint tree) usually has no config.json of its
+    # own, so fall back to an explicit --config-from source — normally the EXL3
+    # model dir, whose config.json carries the same engram fields.
     cfg = src / "config.json"
+    if not cfg.is_file() and config_from is not None:
+        candidate = config_from / "config.json" if config_from.is_dir() else config_from
+        if candidate.is_file():
+            cfg = candidate
+            actions["config.json-from"] = str(candidate)
     if cfg.is_file():
         shutil.copy2(cfg, dst / "config.json")
         actions["config.json"] = "copy"
+    else:
+        raise SystemExit(
+            f"no config.json in {src} and no --config-from source given; "
+            f"engram_file_backend needs table_dir/config.json "
+            f"(pass --config-from <EXL3 model dir>)"
+        )
     return {"dst": str(dst), "tensors": sorted(keep), "files": actions}
 
 
@@ -91,8 +110,15 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--src", required=True, type=Path)
     parser.add_argument("--dst", required=True, type=Path)
+    parser.add_argument(
+        "--config-from",
+        type=Path,
+        default=None,
+        help="directory (or config.json path) to take config.json from when "
+        "--src has none — typically the EXL3 model dir",
+    )
     args = parser.parse_args()
-    info = prepare(args.src.resolve(), args.dst.resolve())
+    info = prepare(args.src.resolve(), args.dst.resolve(), args.config_from)
     print(
         f"engram-src {info['dst']}: {len(info['tensors'])} embed tensors, "
         + ", ".join(f"{k}={v}" for k, v in info["files"].items()),

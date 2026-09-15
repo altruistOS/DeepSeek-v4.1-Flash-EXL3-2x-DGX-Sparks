@@ -209,6 +209,10 @@ CONTAINER_WORKER="${CONTAINER_WORKER:-dsv41-exl3-worker}"
 
 MODEL_HOST="${MODEL_HOST:-$SCRIPT_DIR/model}"
 ENGRAM_DIR="${ENGRAM_DIR:-$SCRIPT_DIR/engram-src}"
+# Where a materialized (real-file) copy of $MODEL_HOST lands when the operator
+# pointed MODEL_HOST at an HF hub snapshot. The snapshot is a symlink tree into
+# blobs/, which cannot be NFS-exported (see ensure_materialized_model).
+MATERIALIZE_ROOT="${MATERIALIZE_ROOT:-$HOME/.cache/vllm-dsv41-flash-exl3/model}"
 # Hub sources. The EXL3 weights are ours; the Engram tables are never
 # quantized and never copied into the EXL3 tree, so they come from the
 # original DeepSeek checkpoint (shards 47+48 and the index only).
@@ -393,8 +397,14 @@ resolve_weight_backend() {
 }
 
 prepare_engram_src_dir() {
+    # --config-from $MODEL_HOST: $ENGRAM_DIR is the native checkpoint tree,
+    # which carries no config.json of its own. engram_file_backend needs
+    # table_dir/config.json for text_config.engram_layer_ids /
+    # engram_num_embeddings, so take it from the EXL3 model dir, whose
+    # config.json holds the same engram fields.
     python3 "$SCRIPT_DIR/scripts/prepare_engram_src.py" \
         --src "$ENGRAM_DIR" --dst "$ENGRAM_SRC" \
+        --config-from "$MODEL_HOST" \
         || die "failed to build slim Engram src at $ENGRAM_SRC (need shards 47+48 under $ENGRAM_DIR)"
 }
 
@@ -403,6 +413,95 @@ usage() { sed -n '2,48p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 count_model_shards() {
     # -L: $MODEL_HOST may be a symlink into the default HF hub cache
     find -L "$1" -maxdepth 1 -name 'model-*.safetensors' 2>/dev/null | wc -l | tr -d '[:space:]' || true
+}
+
+# is_symlink_tree DIR — true when DIR holds relative symlinks into a blob store
+# outside itself (the layout huggingface_hub lays down in snapshots/<rev>/).
+#
+# This is the shape that breaks NFS: `model/config.json -> ../../blobs/<sha>`.
+# The export root is DIR, so every entry resolves *outside* it and the worker's
+# `test -f /m/config.json` fails even though `ls /m` lists the name.
+is_symlink_tree() {
+    local dir="$1" n=0 links=0 entry
+    while IFS= read -r entry; do
+        n=$((n + 1))
+        [ -L "$entry" ] && links=$((links + 1))
+    done < <(find "$dir" -mindepth 1 -maxdepth 1)
+    [ "$n" -gt 0 ] && [ "$links" -eq "$n" ]
+}
+
+# materialize_dir SRC DST — dereference every top-level entry of SRC into real
+# files under DST, hardlinked when possible (same filesystem ⇒ zero extra
+# bytes) and copied otherwise. Symlinks are resolved with readlink -f first, so
+# the result contains no symlink that can dangle once DST is exported on its own.
+#
+# `cp -a --link` is NOT enough here: it preserves the symlink itself, leaving
+# the copy just as dangling as the source.
+materialize_dir() {
+    local src="$1" dst="$2" entry base resolved
+    src="$(readlink -f "$src")"
+    [ -n "$src" ] && [ -d "$src" ] || die "materialize_dir: $1 is not a directory"
+    # mkdir before resolving dst: readlink -f returns empty for a path that
+    # does not exist yet on some platforms (macOS), and we want the real path.
+    mkdir -p "$dst"
+    dst="$(readlink -f "$dst")"
+    [ -n "$dst" ] && [ -d "$dst" ] || die "materialize_dir: cannot create $2"
+    while IFS= read -r entry; do
+        base="$(basename "$entry")"
+        # `test -e` follows the symlink, so a dangling entry (blob not fetched)
+        # is skipped here — on every platform. Do not rely on readlink -f to
+        # report that: GNU coreutils returns empty for a dangling link, while
+        # BSD/macOS returns the link's parent directory instead.
+        [ -e "$entry" ] || continue
+        resolved="$(readlink -f "$entry" 2>/dev/null || true)"
+        [ -n "$resolved" ] && [ -e "$resolved" ] || continue
+        if [ -e "$dst/$base" ] && [ ! -L "$dst/$base" ]; then
+            # Already a real file here; keep it (never clobber the operator's tree).
+            continue
+        fi
+        rm -f "$dst/$base" 2>/dev/null || true
+        if [ -d "$resolved" ]; then
+            cp -R "$resolved" "$dst/$base"
+        else
+            ln -f "$resolved" "$dst/$base" 2>/dev/null || cp -p "$resolved" "$dst/$base"
+        fi
+    done < <(find "$src" -mindepth 1 -maxdepth 1)
+}
+
+# ensure_materialized_model — the head bind-mounts $MODEL_HOST into /model, and
+# the NFS exporter publishes it to the worker. Both need real files. When
+# $MODEL_HOST is a symlink into the HF snapshot tree, replace it with a
+# materialized real-file directory beside the cache and repoint the symlink.
+#
+# MATERIALIZE_ROOT (default $CACHE_ROOT/model) is where the real tree lands —
+# the same shape ./download.sh leaves for the engram tree (a slim real dir
+# beside the cache, with the symlink pointing at it).
+ensure_materialized_model() {
+    local target="$MODEL_HOST"
+    [ -L "$target" ] || return 0
+    local snap; snap="$(readlink -f "$target")"
+    [ -d "$snap" ] || die "$target points at $snap, which is not a directory"
+    is_symlink_tree "$snap" || return 0
+
+    local real="${MATERIALIZE_ROOT:-$CACHE_ROOT/model}"
+    # Already pointing at the materialized tree (or at real files directly)?
+    if [ -n "$(readlink -f "$real" 2>/dev/null || true)" ] \
+       && [ "$snap" = "$(readlink -f "$real")" ]; then
+        return 0
+    fi
+
+    log "materializing EXL3: $snap holds symlinks into blobs/ (they dangle once exported)"
+    local have_real=0
+    if [ -f "$real/config.json" ] && [ "$(count_model_shards "$real")" -ge "$EXPECTED_SHARDS" ]; then
+        have_real=1
+    fi
+    [ "$have_real" = "1" ] || materialize_dir "$snap" "$real"
+    [ -f "$real/config.json" ] || die "materialized EXL3 missing config.json in $real"
+    local n; n="$(count_model_shards "$real")"
+    [ "${n:-0}" -ge "$EXPECTED_SHARDS" ] \
+        || die "materialized EXL3 at $real has ${n:-0}/$EXPECTED_SHARDS shards"
+    ln -sfn "$real" "$target"
+    log "materialized EXL3: $target -> $real ($n shards, real files)"
 }
 
 # ---------------------------- weight fetch ---------------------------------
@@ -442,6 +541,12 @@ fetch_weights() {
     have="$(count_model_shards "$MODEL_HOST")"
     [ "${have:-0}" -ge "$EXPECTED_SHARDS" ] && [ -f "$MODEL_HOST/config.json" ] || need_model=1
     engram_complete || need_engram=1
+    # A symlink into the HF snapshot tree counts as "present" above, but it
+    # cannot be exported: every entry resolves outside the export root. Turn it
+    # into real files before preflight (and before nfs_share) looks at it.
+    if [ "$need_model" = "0" ]; then
+        ensure_materialized_model
+    fi
     [ "$need_model" = "0" ] && [ "$need_engram" = "0" ] && return 0
 
     if [ "${AUTO_DOWNLOAD:-1}" != "1" ]; then

@@ -93,3 +93,5 @@ Thumbs.db
 # Scratch space — intermediate outputs, one-off scripts, agent working files
 /scratchpad/
 /.scratchpad/
+# Machine-local agent memory/index store (dsh) — per-clone state, never shipped
+/.dsh-project-memory/
