@@ -126,11 +126,28 @@ nfs_ensure_server() {
     for mod in sunrpc nfsd lockd; do
         lsmod | grep -q "^\${mod} " || modprobe "$mod" 2>/dev/null || true
     done
+    # 宿主预挂载：内核伪文件系统必须在宿主机的 PID 命名空间中注册，
+    # 容器 --pid=host 共享宿主 PID 命名空间后方可继承挂载这些目录。
+    # 非特权（普通用户）无法使用 mount 挂载内核文件系统，所以需要 sudo。
+    # 只在本机操作，不修改镜像内容，不删除镜像仓库，不影响系统安全。
+    local host_premounted=0
+    if mount | grep -q "type nfsd" && mount | grep -q "type rpc_pipefs"; then
+        host_premounted=1
+    elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+        sudo mkdir -p /var/lib/nfs/v4recovery /var/lib/nfs/rpc_pipefs
+        sudo mount -t nfsd nfsd /proc/fs/nfsd 2>/dev/null || true
+        mountpoint -q /run/rpc_pipefs || sudo mount -t rpc_pipefs rpc_pipefs /run/rpc_pipefs 2>/dev/null || true
+        mountpoint -q /var/lib/nfs/rpc_pipefs || sudo mount -t rpc_pipefs rpc_pipefs /var/lib/nfs/rpc_pipefs 2>/dev/null || true
+        mount | grep -q "type nfsd" && mount | grep -q "type rpc_pipefs" && host_premounted=1
+    fi
+    [ "$host_premounted" = "1" ] && log "NFS host filesystems pre-mounted (nfsd + rpc_pipefs); container will inherit via --pid=host" \
+        || warn "host nfsd/rpc_pipefs not pre-mounted (no passwordless sudo?); container will attempt to mount on its own — if exportfs fails, run:  sudo mkdir -p /var/lib/nfs/rpc_pipefs && sudo mount -t nfsd nfsd /proc/fs/nfsd && sudo mount -t rpc_pipefs rpc_pipefs /var/lib/nfs/rpc_pipefs"
     docker run -d --name "$NFS_CONTAINER" --restart unless-stopped \
         --privileged --network host --pid=host \
         -v "$MODEL_HOST:/export/${NFS_EXPORT_MODEL}:ro" \
         -v "$ENGRAM_SRC:/export/${NFS_EXPORT_ENGRAM}:ro" \
         -e "NFS_CLIENTS=$clients" \
+        -e "NFS_HOST_PREMOUNTED=$host_premounted" \
         "$NFS_IMAGE" >/dev/null
     local i
     for i in $(seq 1 20); do
