@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Kernel NFS server (privileged, host network). Exports /export read-only.
+# Kernel NFS server (privileged, host network, shared PID namespace). Exports /export read-only.
 set -euo pipefail
 
 EXPORT_DIR="${EXPORT_DIR:-/export}"
