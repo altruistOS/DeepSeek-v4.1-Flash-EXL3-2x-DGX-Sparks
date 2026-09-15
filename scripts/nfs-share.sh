@@ -229,8 +229,37 @@ nfs_worker_has_file() {
   " >/dev/null 2>&1
 }
 
+nfs_host_mode_share() {
+    # 原生宿主机 NFS 模式（HOST_NFS=1）：跳过容器导出器，复用系统管理员
+    # 已配置好的 /etc/exports 导出目录，worker 端 docker volume 直连挂载。
+    local ip="${NFS_SERVER_IP:-$(nfs_server_ip)}"
+    [ -n "$ip" ] || die "NFS_SERVER_IP not set and no route to WORKER_IP — set it in .env"
+    # 导出表核验：两个导出目录（EXL3 model、slim Engram）必须已在 /etc/exports 中注册
+    showmount -e localhost 2>/dev/null | grep -q "$NFS_EXPORT_MODEL" \
+        || die "HOST_NFS=1 but ${NFS_EXPORT_MODEL} is not in showmount output. Add it to /etc/exports and run: sudo exportfs -rav"
+    showmount -e localhost 2>/dev/null | grep -q "$NFS_EXPORT_ENGRAM" \
+        || die "HOST_NFS=1 but ${NFS_EXPORT_ENGRAM} is not in showmount output. Add it to /etc/exports and run: sudo exportfs -rav"
+    log "host-native NFS mode: reusing system nfs-server exports via $ip"
+    # worker 端 docker volume 直连挂载宿主机导出目录（注意，挂载点的目录路径）
+    nfs_ensure_worker_volume "$NFS_VOLUME_MODEL" "${NFS_DEVICE_MODEL}"
+    nfs_ensure_worker_volume "$NFS_VOLUME_ENGRAM" "${NFS_DEVICE_ENGRAM}"
+    if nfs_worker_has_file "$NFS_VOLUME_MODEL" "config.json"; then
+        log "worker sees $NFS_VOLUME_MODEL over host-native NFS"
+    else
+        die "worker cannot see EXL3 over host-native NFS. Check /etc/exports ACL and: sudo exportfs -rav"
+    fi
+    if nfs_worker_has_file "$NFS_VOLUME_ENGRAM" "model-00047-of-00048.safetensors"; then
+        log "worker sees $NFS_VOLUME_ENGRAM over host-native NFS"
+    else
+        die "worker cannot see Engram over host-native NFS. Check /etc/exports ACL."
+    fi
+    NFS_REUSE_EXPORT=1
+    NFS_LIVE_CTN=""
+}
+
 nfs_share() {
-    [ "$NFS_SHARE" = "0" ] && die "NFS_SHARE=0 but weight backend is nfs"
+    if [ "${HOST_NFS:-0}" = "1" ]; then nfs_host_mode_share; return 0; fi
+    [ "$NFS_SHARE" = "0" ] && die "NFS_SHARE=0 but weight backend is nfs (set HOST_NFS=1 to reuse host nfs-server exports)"
     [ -n "$(nfs_server_ip)" ] || die "cannot work out which address to export EXL3 on: no route from this host to WORKER_IP=${WORKER_IP:-unset}. Set NFS_SERVER_IP (and NFS_CLIENTS) in .env."
     nfs_ensure_server
     nfs_publish
