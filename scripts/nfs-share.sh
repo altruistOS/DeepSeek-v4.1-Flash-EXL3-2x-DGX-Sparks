@@ -223,9 +223,13 @@ nfs_ensure_worker_volume() {
 
 nfs_worker_has_file() {
     local volume="$1" rel="$2"
+    local probe="${NFS_PROBE_IMAGE:-$IMAGE}"
+    [ -n "$probe" ] || probe=alpine:latest
+    # worker 端挂载实验（手动）：用 worker 本地已有镜像做探针，
+    # 避免依赖 alpine:latest 拉取（镜像仓库/代理列表不可达时仍能运行）
     worker_ssh "
-    docker image inspect alpine:latest >/dev/null 2>&1 || docker pull alpine:latest >/dev/null
-    docker run --rm -v '${volume}:/m:ro' alpine:latest test -f /m/${rel}
+    docker image inspect '$probe' >/dev/null 2>&1 || docker pull '$probe' >/dev/null 2>&1 || true
+    docker run --rm -v '${volume}:/m:ro' $probe test -f /m/${rel}
   " >/dev/null 2>&1
 }
 
