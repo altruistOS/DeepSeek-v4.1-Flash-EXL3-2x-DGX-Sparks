@@ -121,6 +121,11 @@ nfs_ensure_server() {
     # --pid=host: kernel nfsd export table lives in the host PID namespace;
     # without a shared PID ns the container's own mount of /proc/fs/nfsd is
     # private and exportfs there can not register exports the host sees.
+    # sunrpc/nfsd 内核模块必须先在宿主机加载（容器共享宿主），否则容器内
+    # mount -t rpc_pipefs 报 No such device，导出表无法注册（见 start.sh 注释）。
+    for mod in sunrpc nfsd lockd; do
+        lsmod | grep -q "^\${mod} " || modprobe "$mod" 2>/dev/null || true
+    done
     docker run -d --name "$NFS_CONTAINER" --restart unless-stopped \
         --privileged --network host --pid=host \
         -v "$MODEL_HOST:/export/${NFS_EXPORT_MODEL}:ro" \
