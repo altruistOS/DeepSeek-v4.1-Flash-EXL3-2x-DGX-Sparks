@@ -118,8 +118,11 @@ nfs_ensure_server() {
     DOCKER_BUILD_DISABLE_PULL=1 docker build -q -t "$NFS_IMAGE" "$NFS_DOCKERFILE_DIR" >/dev/null
     docker rm -f "$NFS_CONTAINER" >/dev/null 2>&1 || true
     log "exporting EXL3 + slim Engram via NFS (clients: $clients)"
+    # --pid=host: kernel nfsd export table lives in the host PID namespace;
+    # without a shared PID ns the container's own mount of /proc/fs/nfsd is
+    # private and exportfs there can not register exports the host sees.
     docker run -d --name "$NFS_CONTAINER" --restart unless-stopped \
-        --privileged --network host \
+        --privileged --network host --pid=host \
         -v "$MODEL_HOST:/export/${NFS_EXPORT_MODEL}:ro" \
         -v "$ENGRAM_SRC:/export/${NFS_EXPORT_ENGRAM}:ro" \
         -e "NFS_CLIENTS=$clients" \
