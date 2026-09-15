@@ -401,7 +401,8 @@ prepare_engram_src_dir() {
 usage() { sed -n '2,48p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 count_model_shards() {
-    find "$1" -maxdepth 1 -name 'model-*.safetensors' 2>/dev/null | wc -l | tr -d '[:space:]' || true
+    # -L: $MODEL_HOST may be a symlink into the default HF hub cache
+    find -L "$1" -maxdepth 1 -name 'model-*.safetensors' 2>/dev/null | wc -l | tr -d '[:space:]' || true
 }
 
 # ---------------------------- weight fetch ---------------------------------

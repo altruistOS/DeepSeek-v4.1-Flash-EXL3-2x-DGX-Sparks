@@ -112,7 +112,10 @@ nfs_ensure_server() {
     [ -d "$ENGRAM_SRC" ] || die "slim Engram src missing: $ENGRAM_SRC (prepare_engram_src first)"
 
     log "building NFS image $NFS_IMAGE"
-    docker build -q -t "$NFS_IMAGE" "$NFS_DOCKERFILE_DIR" >/dev/null
+    # 离线友好的 build：若本地已有可命中的 base 层缓存（alpine:latest 曾被 docker.io
+    # 镜像代理列表/镜像宝等途径拉取到本地），则跳过 BuildKit 默认策略中远端 registry 解析，
+    # 避免因镜像访问的 registry-mirrors 列表全部延迟或连接超时，影响构建效率与发布计划的安全。
+    DOCKER_BUILD_DISABLE_PULL=1 docker build -q -t "$NFS_IMAGE" "$NFS_DOCKERFILE_DIR" >/dev/null
     docker rm -f "$NFS_CONTAINER" >/dev/null 2>&1 || true
     log "exporting EXL3 + slim Engram via NFS (clients: $clients)"
     docker run -d --name "$NFS_CONTAINER" --restart unless-stopped \
